@@ -36,6 +36,12 @@ namespace hsvr
             Vec3 anchor;           // world position of the point between the eyes at recenter pose
             double base_yaw = 0.0; // world heading that "straight ahead" maps to
             Recenter recenter;
+            // The eye position relative to the character's root, captured at recenter. Used by the
+            // body anchor so the camera does not depend on the head bone (no feedback loop) and
+            // does not have to guess the character's height.
+            Vec3 body_offset;
+            double body_offset_yaw = 0.0;
+            bool have_body_offset = false;
         };
         FrameView g_view;
         bool g_have_smoothed = false;
@@ -52,12 +58,14 @@ namespace hsvr
             g_view.valid = vr_latch_frame_pose(pose);
             if (!g_view.valid) return;
             g_view.pose = pose;
-            if (shared().recenter_requested.exchange(false)) vr_set_recenter_from(pose);
+            bool recentered = shared().recenter_requested.exchange(false);
+            if (recentered) vr_set_recenter_from(pose);
             g_view.recenter = vr_recenter();
             if (!g_view.recenter.valid)
             {
                 vr_set_recenter_from(pose);
                 g_view.recenter = vr_recenter();
+                recentered = true;
             }
 
             g_view.base_yaw = camera_rotation.Yaw;
@@ -65,7 +73,10 @@ namespace hsvr
             g_view.anchor = camera;
             PlayerAnchor player;
             bool have_player = g_anchor_provider && g_anchor_provider(player) && player.has_head;
-            bool first_person = cfg.anchor == "head" && !shared().third_person.load();
+            // With the head as a pose target the camera must not be derived from the head bone, or
+            // moving the head moves the camera, which moves the character: a feedback loop.
+            bool body_anchor = cfg.anchor == "body";
+            bool first_person = (cfg.anchor == "head" || body_anchor) && !shared().third_person.load();
             double camera_yaw = g_view.base_yaw;
             if (first_person && have_player)
             {
@@ -73,22 +84,42 @@ namespace hsvr
                 // the camera trails the aim and shakes on hits, which in a headset would swing
                 // the whole world around.
                 if (cfg.heading == "aim" && player.has_heading) g_view.base_yaw = player.heading_yaw;
-                Vec3 offset = player.head_position - player.actor_position;
-                if (!g_have_smoothed || cfg.anchor_smoothing <= 0.0)
+                if (body_anchor)
                 {
-                    g_smoothed_offset = offset;
-                    g_have_smoothed = true;
+                    // Camera from the character root plus a measured eye offset, independent of the
+                    // head bone. The offset is captured from the character's own head at recenter.
+                    g_have_smoothed = false;
+                    Quat base = quat_from_yaw_deg(g_view.base_yaw);
+                    if (recentered || !g_view.have_body_offset)
+                    {
+                        Vec3 eye_world = player.head_position + base.rotate({cfg.eye_forward_cm, 0.0, 0.0}) + Vec3{0.0, 0.0, cfg.eye_up_cm};
+                        g_view.body_offset = eye_world - player.actor_position;
+                        g_view.body_offset_yaw = g_view.base_yaw;
+                        g_view.have_body_offset = true;
+                        HSVR_LOG("Pose: body anchor captured at %.0f cm above the character root", std::sqrt(g_view.body_offset.x * g_view.body_offset.x + g_view.body_offset.y * g_view.body_offset.y + g_view.body_offset.z * g_view.body_offset.z));
+                    }
+                    Quat turn = quat_from_yaw_deg(g_view.base_yaw - g_view.body_offset_yaw);
+                    g_view.anchor = player.actor_position + turn.rotate(g_view.body_offset);
                 }
                 else
                 {
-                    double alpha = 1.0 - std::exp(-g_delta_seconds / cfg.anchor_smoothing);
-                    Vec3 delta = offset - g_smoothed_offset;
-                    // A big jump (teleport, respawn) is taken at once.
-                    if (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z > 150.0 * 150.0) alpha = 1.0;
-                    g_smoothed_offset = g_smoothed_offset + delta * alpha;
+                    Vec3 offset = player.head_position - player.actor_position;
+                    if (!g_have_smoothed || cfg.anchor_smoothing <= 0.0)
+                    {
+                        g_smoothed_offset = offset;
+                        g_have_smoothed = true;
+                    }
+                    else
+                    {
+                        double alpha = 1.0 - std::exp(-g_delta_seconds / cfg.anchor_smoothing);
+                        Vec3 delta = offset - g_smoothed_offset;
+                        // A big jump (teleport, respawn) is taken at once.
+                        if (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z > 150.0 * 150.0) alpha = 1.0;
+                        g_smoothed_offset = g_smoothed_offset + delta * alpha;
+                    }
+                    Quat base = quat_from_yaw_deg(g_view.base_yaw);
+                    g_view.anchor = player.actor_position + g_smoothed_offset + base.rotate({cfg.eye_forward_cm, 0.0, 0.0}) + Vec3{0.0, 0.0, cfg.eye_up_cm};
                 }
-                Quat base = quat_from_yaw_deg(g_view.base_yaw);
-                g_view.anchor = player.actor_position + g_smoothed_offset + base.rotate({cfg.eye_forward_cm, 0.0, 0.0}) + Vec3{0.0, 0.0, cfg.eye_up_cm};
             }
             else
             {
@@ -326,6 +357,47 @@ namespace hsvr
             return instance;
         }
     } // namespace
+
+    bool stereo_headset_world(Vec3& out_position_cm)
+    {
+        if (!g_view.valid) return false;
+        Config cfg = config();
+        const XrEyeRaw& a = g_view.pose.eye[0];
+        const XrEyeRaw& b = g_view.pose.eye[1];
+        Vec3 eye_real_cm = xr_to_ue_position((a.px + b.px) * 0.5f, (a.py + b.py) * 0.5f, (a.pz + b.pz) * 0.5f, 100.0);
+        Quat recenter_inverse = quat_from_yaw_deg(g_view.recenter.yaw_deg).inverse();
+        Vec3 relative = recenter_inverse.rotate(eye_real_cm - g_view.recenter.position_cm) * (cfg.world_scale > 0.0 ? cfg.world_scale : 1.0);
+        Quat base = quat_from_yaw_deg(g_view.base_yaw);
+        Vec3 world = g_view.anchor + base.rotate(relative);
+        // The eyes sit forward and up from the head bone; the target is where the bone must go.
+        out_position_cm = world - base.rotate({cfg.eye_forward_cm, 0.0, 0.0}) - Vec3{0.0, 0.0, cfg.eye_up_cm};
+        return true;
+    }
+
+    bool stereo_world_to_eye_uv(const Vec3& world_cm, float px, float py, float pz, float qx, float qy, float qz, float qw, float angle_left,
+                                float angle_right, float angle_up, float angle_down, float& u, float& v, float& depth_m)
+    {
+        Config cfg = config();
+        Vec3 relative = world_cm - g_view.anchor;
+        Vec3 rotated = quat_from_yaw_deg(-g_view.base_yaw).rotate(relative);
+        double scale = 1.0 / (100.0 * (cfg.world_scale > 0.0 ? cfg.world_scale : 1.0));
+        // Unreal axes (X forward, Y right, Z up) to OpenXR tracking axes (X right, Y up, -Z forward).
+        Vec3 xr{rotated.y * scale, rotated.z * scale, -rotated.x * scale};
+        Quat eye_rotation{qx, qy, qz, qw};
+        Vec3 eye_position{px, py, pz};
+        Vec3 eye_space = eye_rotation.inverse().rotate(xr - eye_position);
+        double depth = -eye_space.z;
+        depth_m = (float)depth;
+        if (depth <= 0.01) return false;
+        double tan_x = eye_space.x / depth;
+        double tan_y = eye_space.y / depth;
+        double tan_left = std::tan(angle_left), tan_right = std::tan(angle_right);
+        double tan_up = std::tan(angle_up), tan_down = std::tan(angle_down);
+        if (tan_right <= tan_left || tan_up <= tan_down) return false;
+        u = (float)((tan_x - tan_left) / (tan_right - tan_left));
+        v = (float)((tan_up - tan_y) / (tan_up - tan_down));
+        return true;
+    }
 
     void stereo_set_anchor_provider(AnchorProvider provider)
     {

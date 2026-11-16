@@ -1,4 +1,4 @@
-﻿// Motion controls: the controllers move the character's arms. See arm_control.hpp for the idea.
+// Motion controls: the controllers move the character's arms. See arm_control.hpp for the idea.
 //
 // Order of events in one frame (game thread):
 //  1. arm_game_tick (before the world ticks): read both controllers, put them into the game
@@ -17,6 +17,7 @@
 #include "arm_control.hpp"
 
 #include "config.hpp"
+#include <mutex>
 #include "log.hpp"
 #include "stereo_device.hpp"
 #include "ue_abi.hpp"
@@ -381,11 +382,17 @@ namespace hsvr
             Vec3 upper_axis, lower_axis; // bone direction in the bone's own frame
             bool have_hinge = false;
             Vec3 hinge_upper, hinge_lower; // elbow hinge axis in each bone's frame
-            // How the hand holds things: hand-local vectors (from the physical body's bones).
-            bool have_grip = false;
-            bool grip_from_weapon = false;
-            Vec3 grip_forward; // hand-local: the handle direction (towards the thumb / the blade)
-            Vec3 grip_center;  // hand-local: from the hand bone to the middle of the fist / the grip
+            // How the hand holds things, learned per state (hand-local, from the physical body):
+            // with a weapon, with a closed fist, and with an open hand. The game moves the hand
+            // a lot between those states; one shared measurement made the wrist roll wildly when
+            // the trigger was released and the game went to fists.
+            struct GripFrame
+            {
+                Vec3 forward{1, 0, 0}; // handle direction (towards the thumb / the blade)
+                Vec3 center{};         // from the hand bone to the middle of the fist / the grip
+                bool have = false;
+            };
+            GripFrame grip_weapon, grip_closed, grip_open;
             // This frame's target.
             bool target_valid = false;
             Xf target_world; // where the hand bone should be
@@ -399,6 +406,8 @@ namespace hsvr
             double last_twist = 0;
             Vec3 assist_pos, assist_rot; // hold assist, in the upper body's frame (cm, rotation vector)
             double assist_time = 0;    // hand roll about the forearm last frame, radians (unwrapped)
+            double reach_distance = -1.0; // smoothed distance the FABRIK goal is placed at
+            double reach_time = 0.0;
         };
 
         struct State
@@ -413,6 +422,7 @@ namespace hsvr
             int32_t bone_count = 0;
             std::vector<int32_t> parents;
             bool ready = false; // bones known, layout found
+            int32_t head_bone = -1;
             Side side[2] = {{L"_l", "left", -1.0, 0}, {L"_r", "right", 1.0, 1}};
             XrHandRaw hands[2];
             bool hands_valid = false;
@@ -581,7 +591,8 @@ namespace hsvr
                 side.lower_name = side_name(L"lowerarm", side);
                 side.middle_name = side_name(L"middle_01", side);
                 side.thumb_name = side_name(L"thumb_01", side);
-                side.have_axes = side.have_hinge = side.have_grip = false;
+                side.have_axes = side.have_hinge = false;
+                side.grip_weapon = side.grip_closed = side.grip_open = {};
                 if (side.upper < 0 || side.lower < 0 || side.hand < 0 || s.parents[side.lower] != side.upper || s.parents[side.hand] != side.lower)
                 {
                     HSVR_LOG("Arms: the driver's %s arm is not upperarm -> lowerarm -> hand (%d %d %d); motion arms stay off", side.label, side.upper, side.lower,
@@ -631,6 +642,8 @@ namespace hsvr
                 HSVR_LOG("Arms: no mesh of the character could be hooked; motion arms stay off");
                 return false;
             }
+            s.head_bone = driver_bone_index(FName(STR("Head"), FNAME_Add));
+            HSVR_LOG("Arms: head bone %s (%d)", s.head_bone >= 0 ? "found" : "missing", s.head_bone);
             HSVR_LOG("Arms: ready on %ls (%d meshes follow the arms; arm frames %ls / %ls)", pawn->GetName().c_str(), hooked,
                      s.side[0].parent_name.ToString().c_str(), s.side[1].parent_name.ToString().c_str());
             s.ready = true;
@@ -675,8 +688,9 @@ namespace hsvr
             }
         }
 
-        // How the hand holds a weapon (right hand) or a closed fist, measured on the physical body.
-        void learn_grip(Side& side)
+        // How the hand holds things, measured on the physical body. A weapon, a closed fist and an
+        // open hand each get their own frame, and the frame for the current state is used.
+        void learn_grip(Side& side, bool closed)
         {
             State& s = g_state;
             Xf hand;
@@ -684,7 +698,7 @@ namespace hsvr
             Quat inv = hand.q.inverse();
             Config cfg = config();
             bool from_weapon = false;
-            Vec3 forward, center;
+            Vec3 forward{1, 0, 0}, center{};
             if (side.out_sign > 0.0)
             {
                 UObject* weapon = object_property(s.pawn, STR("Weapon R"));
@@ -697,6 +711,7 @@ namespace hsvr
                     from_weapon = length(perpendicular_part(center, forward)) > 1.0;
                 }
             }
+            Side::GripFrame* frame = from_weapon ? &side.grip_weapon : (closed ? &side.grip_closed : &side.grip_open);
             if (!from_weapon)
             {
                 Xf middle, thumb;
@@ -708,20 +723,19 @@ namespace hsvr
                 forward = normalized(perpendicular_part(thumb_dir, k));
                 center = knuckle * 0.7 + forward * cfg.grip_shift_cm;
             }
-            bool first = !side.have_grip || side.grip_from_weapon != from_weapon;
-            if (first)
+            if (!frame->have)
             {
-                side.grip_forward = forward;
-                side.grip_center = center;
-                side.have_grip = true;
-                side.grip_from_weapon = from_weapon;
+                frame->forward = forward;
+                frame->center = center;
+                frame->have = true;
                 HSVR_LOG("Arms: %s hand grip measured from %s: handle (%.2f %.2f %.2f), grip centre (%.1f %.1f %.1f) cm in the hand's frame", side.label,
-                         from_weapon ? "the weapon in it" : "its fingers", forward.x, forward.y, forward.z, center.x, center.y, center.z);
+                         from_weapon ? "the weapon in it" : (closed ? "its closed fist" : "its open hand"), forward.x, forward.y, forward.z, center.x, center.y,
+                         center.z);
             }
             else
             {
-                side.grip_forward = normalized(side.grip_forward * 0.9 + forward * 0.1);
-                side.grip_center = side.grip_center * 0.9 + center * 0.1;
+                frame->forward = normalized(frame->forward * 0.9 + forward * 0.1);
+                frame->center = frame->center * 0.9 + center * 0.1;
             }
         }
 
@@ -736,7 +750,14 @@ namespace hsvr
                 side.target_valid = false;
                 const XrHandRaw& raw = s.hands[side.controller_index];
                 bool wanted = side.out_sign > 0 ? cfg.arm_right : cfg.arm_left;
-                if (!wanted || !raw.valid || !side.have_grip)
+                bool closed = raw.trigger > 0.5f || raw.squeeze > 0.5f;
+                const Side::GripFrame* frame = nullptr;
+                if (side.grip_weapon.have) frame = &side.grip_weapon;
+                else if (closed && side.grip_closed.have) frame = &side.grip_closed;
+                else if (!closed && side.grip_open.have) frame = &side.grip_open;
+                else if (side.grip_closed.have) frame = &side.grip_closed;
+                else if (side.grip_open.have) frame = &side.grip_open;
+                if (!wanted || !raw.valid || !frame)
                 {
                     side.assist_pos = {};
                     side.assist_rot = {};
@@ -748,12 +769,12 @@ namespace hsvr
                 if (!stereo_tracking_to_world(raw.px, raw.py, raw.pz, raw.qx, raw.qy, raw.qz, raw.qw, grip_pos, grip_rot)) continue;
                 grip_rot = (grip_rot * extra).normalized();
                 // The controller's handle (+X) and the direction from the wrist into the fist (-Z)
-                // match the hand's handle and grip-centre directions.
-                Quat hand_frame = quat_from_frame(side.grip_forward, side.grip_center);
+                // match the hand's handle and grip-centre directions for the current hand state.
+                Quat hand_frame = quat_from_frame(frame->forward, frame->center);
                 Quat controller_frame = quat_from_frame({1, 0, 0}, {0, 0, -1});
                 Quat hand_rot = (grip_rot * controller_frame * hand_frame.inverse()).normalized();
                 side.target_world.q = hand_rot;
-                side.target_world.t = grip_pos - hand_rot.rotate(side.grip_center);
+                side.target_world.t = grip_pos - hand_rot.rotate(frame->center);
                 side.blade_world = grip_rot.rotate({1, 0, 0});
                 side.target_valid = true;
             }
@@ -810,6 +831,164 @@ namespace hsvr
         }
 
         // ---- bending the driver's arms (game thread, inside a mesh's tick) ---------------------
+        // ---- general pose placement -------------------------------------------------------------
+        // Puts one bone exactly at an asked component-space position and shares the displacement
+        // across its ancestors by weight; optionally also sets its orientation and shares a part
+        // of that rotation with the ancestors (the forearm rolling with the wrist).
+        //
+        // Chain 0 is arm-like (hand -> lowerarm -> upperarm -> clavicle; the spine joins only on a
+        // long reach so the shoulder does not come off the body). Chain 1 is spine-like (even
+        // weights, always including one more ancestor).
+        // Smallest rotation that takes unit vector `from` to unit vector `to`.
+        Quat rotation_between(const Vec3& from, const Vec3& to)
+        {
+            Vec3 a = normalized(from), b = normalized(to);
+            double d = dot(a, b);
+            if (d > 1.0 - 1e-9) return {};
+            if (d < -1.0 + 1e-9)
+            {
+                Vec3 axis = normalized(cross(a, {0, 0, 1}));
+                if (length(axis) < 1e-6) axis = normalized(cross(a, {0, 1, 0}));
+                return quat_axis_angle(axis, 3.14159265358979);
+            }
+            Vec3 axis = cross(a, b);
+            double s = length(axis);
+            return quat_axis_angle(axis * (1.0 / s), std::atan2(s, d));
+        }
+
+        // FABRIK on any driver chain: fixed segment lengths, so the pose is one the physical
+        // ragdoll can reproduce. Used for the hands (arm + shoulder + spine) and for the head
+        // (neck + spine). `gentle_above` is a bone in the chain above which the solved rotation is
+        // only partly taken (so the torso helps without swinging the whole body).
+        void fabrik_chain(State& s, std::vector<Xf>& pose, std::vector<char>& changed, const RawXf* anim, int32_t leaf, const Vec3& target,
+                          const Quat* leaf_rotation, int wanted_bones, int32_t gentle_above, double& smoothed_distance, double& smooth_time,
+                          const Config& cfg)
+        {
+            if (leaf < 0 || leaf >= s.bone_count) return;
+            int32_t bones[6];
+            int n = 0;
+            bones[n++] = leaf;
+            int32_t node = s.parents[leaf];
+            int wanted = std::max(2, std::min(6, wanted_bones));
+            while (node >= 0 && n < wanted)
+            {
+                bones[n++] = node;
+                node = s.parents[node];
+            }
+            if (n < 3) return;
+            for (int i = 0; i < n / 2; ++i)
+            {
+                int32_t swap = bones[i];
+                bones[i] = bones[n - 1 - i];
+                bones[n - 1 - i] = swap;
+            }
+            int gentle_index = -1;
+            if (gentle_above >= 0)
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    if (bones[i] == gentle_above)
+                    {
+                        gentle_index = i;
+                        break;
+                    }
+                }
+            }
+            Vec3 p[6];
+            for (int i = 0; i < n; ++i) p[i] = pose[bones[i]].t;
+            double lengths[5]{};
+            double total = 0.0;
+            for (int i = 0; i < n - 1; ++i)
+            {
+                lengths[i] = length(p[i + 1] - p[i]);
+                if (lengths[i] < 0.5) return;
+                total += lengths[i];
+            }
+            Vec3 root = p[0];
+            Vec3 goal = target;
+            double distance = length(goal - root);
+            if (distance <= 1e-4) return;
+
+            double max_reach = total * std::max(0.5, std::min(1.0, cfg.pose_reach_max));
+            double knee = total * std::max(0.3, std::min(1.0, cfg.pose_reach_knee));
+            if (knee > max_reach) knee = max_reach;
+            // The player's arms may be longer than the character's: scaling the requested distance
+            // stops a fully outstretched player hand mapping far past the character's reach.
+            distance *= std::max(0.5, std::min(1.5, cfg.pose_arm_scale));
+            // How far past the soft knee this target is (0 = within reach, 1 = at/after the limit).
+            double overreach = std::max(0.0, std::min(1.0, (distance - knee) / std::max(1.0, max_reach - knee)));
+            double wanted_distance = distance;
+            if (distance > knee)
+            {
+                double span = std::max(0.5, max_reach - knee);
+                wanted_distance = knee + span * (1.0 - std::exp(-(distance - knee) / span));
+            }
+            double now = now_seconds();
+            double dt = smooth_time > 0.0 ? std::min(0.1, now - smooth_time) : 0.0;
+            smooth_time = now;
+            if (smoothed_distance < 0.0 || cfg.pose_reach_smoothing <= 0.0) smoothed_distance = wanted_distance;
+            else smoothed_distance += (wanted_distance - smoothed_distance) * (1.0 - std::exp(-dt / cfg.pose_reach_smoothing));
+            Vec3 direction = normalized(goal - root);
+            goal = root + direction * std::max(0.0, smoothed_distance);
+
+            for (int iteration = 0; iteration < 10; ++iteration)
+            {
+                p[n - 1] = goal;
+                for (int i = n - 2; i >= 0; --i) p[i] = p[i + 1] + normalized(p[i] - p[i + 1]) * lengths[i];
+                p[0] = root;
+                for (int i = 0; i < n - 1; ++i) p[i + 1] = p[i] + normalized(p[i + 1] - p[i]) * lengths[i];
+            }
+            for (int i = 0; i < n - 1; ++i)
+            {
+                Vec3 old_direction = from_raw(anim[bones[i + 1]]).t - from_raw(anim[bones[i]]).t;
+                Vec3 new_direction = p[i + 1] - p[i];
+                Quat delta = rotation_between(old_direction, new_direction);
+                if (gentle_index >= 0 && i < gentle_index && i < 2)
+                {
+                    if (delta.w < 0.0) delta = {-delta.x, -delta.y, -delta.z, -delta.w};
+                    double angle = 2.0 * std::acos(std::min(1.0, delta.w));
+                    if (angle > 1e-4)
+                    {
+                        Vec3 axis = normalized(Vec3{delta.x, delta.y, delta.z}, {1, 0, 0});
+                        // The more the target exceeds reach, the more the torso leans in, so the
+                        // shoulder/chest help instead of the hand simply falling behind.
+                        double share = std::max(0.0, cfg.pose_reach_spine_share);
+                        share = share + (1.0 - share) * overreach * overreach;
+                        delta = quat_axis_angle(axis, angle * std::min(1.0, share));
+                    }
+                }
+                pose[bones[i]].q = (delta * pose[bones[i]].q).normalized();
+                pose[bones[i]].t = p[i];
+                changed[bones[i]] = 1;
+            }
+            pose[bones[n - 1]].t = p[n - 1];
+            if (leaf_rotation) pose[bones[n - 1]].q = *leaf_rotation;
+            changed[bones[n - 1]] = 1;
+        }
+
+        void fabrik_solve(State& s, Side& side, const RawXf* anim, std::vector<Xf>& pose, std::vector<char>& changed, const Vec3& target,
+                          const Quat* hand_rotation, const Config& cfg)
+        {
+            fabrik_chain(s, pose, changed, anim, side.hand, target, hand_rotation, cfg.pose_reach_bones, side.clavicle, side.reach_distance,
+                         side.reach_time, cfg);
+        }
+
+        // The skeletal mesh component's world transform, for drawing its bones in the world.
+        bool component_to_world(UObject* component, Xf& out)
+        {
+            if (!component) return false;
+            UFunction* fn = component->GetFunctionByNameInChain(STR("K2_GetComponentToWorld"));
+            if (!fn) return false;
+            struct Params
+            {
+                RawXf ReturnValue;
+            } params{};
+            if (fn->GetParmsSize() != (int32_t)sizeof(Params)) return false;
+            component->ProcessEvent(fn, &params);
+            out = from_raw(params.ReturnValue);
+            return true;
+        }
+
         void solve_side(Side& side, const RawXf* anim, std::vector<Xf>& pose, std::vector<char>& changed, const Config& cfg)
         {
             State& s = g_state;
@@ -853,6 +1032,17 @@ namespace hsvr
                 side.assist_time = 0;
             }
             Xf target = compose(target_rel, parent_cs);
+            if (cfg.pose_system)
+            {
+                fabrik_solve(s, side, anim, pose, changed, target.t, cfg.pose_hand_rotation ? &target.q : nullptr, cfg);
+                static bool reported = false;
+                if (!reported)
+                {
+                    reported = true;
+                    HSVR_LOG("Arms: hand targets use the FABRIK chain solver (pose_system=1)");
+                }
+                return;
+            }
             auto to_driver = [&](const Vec3& world_dir) { return parent_cs.q.rotate(parent_world.q.inverse().rotate(world_dir)); };
 
             Xf upper0 = pose[side.upper], lower0 = pose[side.lower], hand0 = pose[side.hand];
@@ -1137,6 +1327,28 @@ namespace hsvr
             std::vector<Xf> pose(s.bone_count);
             for (int32_t i = 0; i < s.bone_count; ++i) pose[i] = from_raw(s.animated[i]);
             std::vector<char> changed(s.bone_count, 0);
+            // The head is a fixed point: the character's head is pulled to where the headset is
+            // (in the recentered world frame) and the neck/spine solve to allow it. Solved before
+            // the arms and then carried into them, so the shoulders stay attached to the spine.
+            if (cfg.pose_head && s.head_bone >= 0)
+            {
+                Vec3 head_target;
+                if (stereo_headset_world(head_target))
+                {
+                    static double head_reach_distance = -1.0;
+                    static double head_reach_time = 0.0;
+                    fabrik_chain(s, pose, changed, s.animated.data(), s.head_bone, head_target, nullptr, cfg.pose_head_bones, -1, head_reach_distance,
+                                 head_reach_time, cfg);
+                    for (int32_t i = 0; i < s.bone_count; ++i)
+                    {
+                        if (changed[i]) continue;
+                        int32_t parent = s.parents[i];
+                        if (parent < 0 || !changed[parent]) continue;
+                        pose[i] = compose(relative(from_raw(s.animated[i]), from_raw(s.animated[parent])), pose[parent]);
+                        changed[i] = 1;
+                    }
+                }
+            }
             for (Side& side : s.side) solve_side(side, s.animated.data(), pose, changed, cfg);
             // Carry every bone below a moved one along with it (fingers, weapon bone).
             bool any = false;
@@ -1184,10 +1396,53 @@ namespace hsvr
         }
     } // namespace
 
+
     void arm_toggle()
     {
         g_state.enabled_by_key = !g_state.enabled_by_key;
         HSVR_LOG(g_state.enabled_by_key ? "Key: motion arms on" : "Key: motion arms off (the game's own arm animation)");
+    }
+
+    void arm_debug_draw()
+    {
+        Config cfg = config();
+        if (!cfg.debug_draw) return;
+        State& s = g_state;
+        static int debug_tick = 0;
+        if ((++debug_tick & 1) != 0) return;
+        static bool reported = false;
+        if (!s.ready || !s.pawn || !s.driver)
+        {
+            if (!reported)
+            {
+                reported = true;
+                HSVR_LOG("DebugDraw: the driver skeleton is not set up yet (arms must have found a character once)");
+            }
+            return;
+        }
+
+        // Show the driver mesh itself: the game keeps this skeletal mesh hidden, and making it
+        // visible is a native, safe way to see what the pose code is bending.
+        static double last_visibility = 0.0;
+        if (now_seconds() - last_visibility >= 1.0)
+        {
+            last_visibility = now_seconds();
+            struct VisibilityParams
+            {
+                bool NewVisibility;
+                bool PropagateToChildren;
+            };
+            if (UFunction* fn = s.driver->GetFunctionByNameInChain(STR("SetVisibility")))
+            {
+                VisibilityParams params{true, true};
+                s.driver->ProcessEvent(fn, &params);
+            }
+            if (UFunction* fn = s.driver->GetFunctionByNameInChain(STR("SetHiddenInGame")))
+            {
+                VisibilityParams params{false, true};
+                s.driver->ProcessEvent(fn, &params);
+            }
+        }
     }
 
     void arm_game_tick(UObject* pawn, bool menu_up)
@@ -1197,7 +1452,7 @@ namespace hsvr
         ++s.frame;
         s.menu_up = menu_up;
         Config cfg = config();
-        if (s.failed || !cfg.motion_arms)
+        if (s.failed || (!cfg.motion_arms && !cfg.debug_draw))
         {
             log_status(cfg);
             return;
@@ -1228,7 +1483,11 @@ namespace hsvr
         if (now >= next_grip)
         {
             next_grip = now + 0.25;
-            for (Side& side : s.side) learn_grip(side);
+            for (Side& side : s.side)
+            {
+                bool closed = s.hands[side.controller_index].trigger > 0.5f || s.hands[side.controller_index].squeeze > 0.5f;
+                learn_grip(side, closed);
+            }
         }
         compute_targets();
         recorder_tick();

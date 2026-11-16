@@ -357,26 +357,25 @@ namespace hsvr
             return action;
         }
 
+        // One call per interaction profile, with every binding the mod wants. It must be one
+        // call: some runtimes replace (rather than merge) the suggestions for a profile, and a
+        // second call then silently drops the hand pose and trigger bindings.
         void suggest_profile(const char* profile, const char* trigger_input, const char* squeeze_input)
         {
             std::vector<XrActionSuggestedBinding> bindings;
+            std::vector<std::string> paths;
+            paths.reserve(16);
             const char* sides[2] = {"left", "right"};
-            std::string paths[6];
-            int n = 0;
+            auto add = [&](XrAction action, const char* side, const char* suffix) {
+                if (!suffix || action == XR_NULL_HANDLE) return;
+                paths.push_back(std::string("/user/hand/") + side + suffix);
+                bindings.push_back({action, to_path(paths.back().c_str())});
+            };
             for (int h = 0; h < 2; ++h)
             {
-                paths[n] = std::string("/user/hand/") + sides[h] + "/input/grip/pose";
-                bindings.push_back({g_hands.grip_pose, to_path(paths[n++].c_str())});
-                if (trigger_input)
-                {
-                    paths[n] = std::string("/user/hand/") + sides[h] + trigger_input;
-                    bindings.push_back({g_hands.trigger, to_path(paths[n++].c_str())});
-                }
-                if (squeeze_input)
-                {
-                    paths[n] = std::string("/user/hand/") + sides[h] + squeeze_input;
-                    bindings.push_back({g_hands.squeeze, to_path(paths[n++].c_str())});
-                }
+                add(g_hands.grip_pose, sides[h], "/input/grip/pose");
+                add(g_hands.trigger, sides[h], trigger_input);
+                add(g_hands.squeeze, sides[h], squeeze_input);
             }
             XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
             suggested.interactionProfile = to_path(profile);
@@ -1968,6 +1967,7 @@ float4 PSMain(VSOut i) : SV_Target
                         c.params[0] = decode ? 1.0f : 0.0f;
                         c.cursor[0] = -1.0f;
                         eyes_acquired[e] = blit_to_swapchain(g.eye[e], srv, c);
+
                         const XrEyeRaw& eye = item.pose.eye[e];
                         views[e].pose.position = {eye.px, eye.py, eye.pz};
                         views[e].pose.orientation = {eye.qx, eye.qy, eye.qz, eye.qw};
@@ -2520,8 +2520,7 @@ float4 PSMain(VSOut i) : SV_Target
     {
         if (config().dev_fake_hands)
         {
-            // Pretend controllers for tests without anyone holding them: both hands in front of
-            // the chest, circling slowly, the handles pointing forward and tilting up and down.
+            // Pretend controllers for tests without anyone holding them.
             float head[3];
             float yaw;
             {
@@ -2532,13 +2531,14 @@ float4 PSMain(VSOut i) : SV_Target
                 yaw = g_recenter_xr_yaw;
             }
             double t = now_seconds();
-            float tilt = (float)((40.0 + 30.0 * std::sin(t * 0.7)) * kDegToRad);
             for (int h = 0; h < 2; ++h)
             {
                 float side = h ? 1.0f : -1.0f;
                 float ox = 0.22f * side + 0.08f * (float)std::sin(t * 1.3);
                 float oy = -0.30f + 0.08f * (float)std::cos(t * 1.3);
                 float oz = -0.35f;
+                float tilt_deg = 40.0f + 30.0f * (float)std::sin(t * 0.7);
+                float tilt = tilt_deg * kDegToRad;
                 // Turn the offset by the recentred heading (about +Y).
                 float cy = std::cos(yaw), sy = std::sin(yaw);
                 XrHandRaw& hand = out[h];
@@ -2556,6 +2556,7 @@ float4 PSMain(VSOut i) : SV_Target
             }
             return true;
         }
+
         XrSession session = g_session.load();
         XrSpace local = g_local_space.load();
         if (g_fake_headset || !g_hands.ready.load() || !shared().xr_running.load() || session == XR_NULL_HANDLE || local == XR_NULL_HANDLE) return false;
@@ -2568,6 +2569,7 @@ float4 PSMain(VSOut i) : SV_Target
         if (g_hands.profile_changed.exchange(false)) log_interaction_profiles(session);
         XrTime time = g_frame_time.load() + g_lead_ns.load();
         bool any = false;
+        bool pose_active[2]{false, false};
         for (int h = 0; h < 2; ++h)
         {
             XrHandRaw& hand = g_hands.last[h];
@@ -2576,6 +2578,7 @@ float4 PSMain(VSOut i) : SV_Target
             info.subactionPath = g_hands.hand_path[h];
             XrActionStatePose pose_state{XR_TYPE_ACTION_STATE_POSE};
             bool active_pose = XR_SUCCEEDED(xr.GetActionStatePose(session, &info, &pose_state)) && pose_state.isActive;
+            pose_active[h] = active_pose;
             XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
             if (active_pose && XR_SUCCEEDED(xr.LocateSpace(g_hands.grip_space[h], local, time, &loc)) &&
                 (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) && (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
@@ -2599,8 +2602,19 @@ float4 PSMain(VSOut i) : SV_Target
             out[h] = hand;
             any = any || hand.valid;
         }
+        static bool was_any = false;
+        if (!any)
+        {
+            HSVR_LOG_EVERY(5.0, "OpenXR: hands not tracked (pose action active L %d R %d)", pose_active[0], pose_active[1]);
+        }
+        else if (!was_any)
+        {
+            HSVR_LOG("OpenXR: hands tracked again");
+        }
+        was_any = any;
         return any;
     }
+
 
     Recenter vr_recenter()
     {

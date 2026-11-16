@@ -1,4 +1,4 @@
-﻿#include "config.hpp"
+#include "config.hpp"
 
 #include "log.hpp"
 
@@ -99,11 +99,12 @@ namespace hsvr
                 "; Save troubleshooting pictures every this many seconds into the captures folder (0 = off).\n"
                 "capture_seconds=%.0f\n"
                 "stereo_slot_offset=%d\n"
-                "dev_fake_headset=%d\n",
+                "dev_fake_headset=%d\n"
+                "dev_fake_hands=%d\n",
                 d.enabled, d.require_steamvr_running, d.render_scale, d.world_scale, d.anchor.c_str(), d.head_bone.c_str(), d.heading.c_str(),
                 d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.near_clip_cm, d.gamma_mode, d.ui_panel, d.ui_panel_auto,
                 d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, d.ui_opacity_gain, d.ui_menu_backdrop, d.ui_use_alpha, d.mirror_window, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key, (unsigned)d.toggle_view_key, (unsigned)d.toggle_mode_key,
-                d.predict_frames, d.pose_max_age, d.separate_render_target, d.sharpen, d.screen_percentage, d.extra_commands.c_str(), d.fix_clouds, d.cloud_mode, d.light_samples, d.idle_helper, d.log_poses, d.log_input, d.capture_seconds, d.stereo_slot_offset, d.dev_fake_headset);
+                d.predict_frames, d.pose_max_age, d.separate_render_target, d.sharpen, d.screen_percentage, d.extra_commands.c_str(), d.fix_clouds, d.cloud_mode, d.light_samples, d.idle_helper, d.log_poses, d.log_input, d.capture_seconds, d.stereo_slot_offset, d.dev_fake_headset, d.dev_fake_hands);
         fprintf(f,
                 "; ---- Motion controls: the controllers move the character's hands ----\n"
                 "motion_arms=%d\n"
@@ -128,8 +129,28 @@ namespace hsvr
                 "hand_yaw=%.1f\n"
                 "hand_roll=%.1f\n"
                 "log_arms=%d\n",
-                d.motion_arms, d.arm_right, d.arm_left, (unsigned)d.toggle_arms_key, d.aim_sync, d.aim_scale, d.aim_invert_y, d.elbow_down, d.elbow_out,
-                d.elbow_back, d.forearm_twist_share, d.grip_shift_cm, d.hand_pitch, d.hand_yaw, d.hand_roll, d.log_arms);
+                d.motion_arms, d.arm_right, d.arm_left, (unsigned)d.toggle_arms_key, d.aim_sync, d.aim_scale, d.aim_invert_y, d.elbow_down, d.elbow_out, d.elbow_back, d.forearm_twist_share, d.grip_shift_cm, d.hand_pitch, d.hand_yaw, d.hand_roll, d.log_arms);
+        fprintf(f,
+                "; ---- Debug view ----\n"
+                "debug_draw=%d\n"
+                "; ---- Driver pose solver ----\n"
+                "pose_system=%d\n"
+                "pose_hand_rotation=%d\n"
+                "pose_reach_bones=%d\n"
+                "pose_reach_max=%.2f\n"
+                "pose_reach_knee=%.2f\n"
+                "pose_reach_smoothing=%.2f\n"
+                "pose_reach_spine_share=%.2f\n"
+                "pose_arm_scale=%.2f\n"
+                "pose_head=%d\n"
+                "pose_head_bones=%d\n"
+                "; 1 = the left hand joins the sword when both hands come together with a grip held.\n"
+                "two_handed=%d\n"
+                "two_handed_offset_cm=%.1f\n"
+                "two_handed_distance_cm=%.1f\n",
+                d.debug_draw, d.pose_system, d.pose_hand_rotation, d.pose_reach_bones, d.pose_reach_max, d.pose_reach_knee, d.pose_reach_smoothing,
+                d.pose_reach_spine_share, d.pose_arm_scale, d.pose_head, d.pose_head_bones, d.two_handed, d.two_handed_offset_cm,
+                d.two_handed_distance_cm);
         fclose(f);
     }
 
@@ -254,6 +275,20 @@ namespace hsvr
         num("hand_yaw", c.hand_yaw);
         num("hand_roll", c.hand_roll);
         flag("log_arms", c.log_arms);
+        flag("debug_draw", c.debug_draw);
+        flag("pose_system", c.pose_system);
+        flag("pose_hand_rotation", c.pose_hand_rotation);
+        integer("pose_reach_bones", c.pose_reach_bones);
+        num("pose_reach_max", c.pose_reach_max);
+        num("pose_reach_knee", c.pose_reach_knee);
+        num("pose_reach_smoothing", c.pose_reach_smoothing);
+        num("pose_reach_spine_share", c.pose_reach_spine_share);
+        num("pose_arm_scale", c.pose_arm_scale);
+        flag("pose_head", c.pose_head);
+        integer("pose_head_bones", c.pose_head_bones);
+        flag("two_handed", c.two_handed);
+        num("two_handed_offset_cm", c.two_handed_offset_cm);
+        num("two_handed_distance_cm", c.two_handed_distance_cm);
         flag("log_poses", c.log_poses);
         flag("log_input", c.log_input);
         num("capture_seconds", c.capture_seconds);

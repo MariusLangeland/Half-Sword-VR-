@@ -1,4 +1,4 @@
-﻿// Settings read from HalfSwordVR.ini next to the mod. The file is re-read when it changes,
+// Settings read from HalfSwordVR.ini next to the mod. The file is re-read when it changes,
 // so values can be tuned while the game runs.
 #pragma once
 #include <string>
@@ -130,8 +130,8 @@ namespace hsvr
         // Hold assist: the steady gap between where a hand is sent and where the muscles hold it
         // is made up for over this many seconds (0 = off), within these limits.
         double assist_seconds = 0.4;
-        double assist_max_cm = 15.0;
-        double assist_max_deg = 35.0;
+        double assist_max_cm = 25.0;
+        double assist_max_deg = 45.0;
         // Share of the hand's roll that the forearm takes (0 = all in the wrist, 1 = all in the forearm).
         double forearm_twist_share = 0.5;
         // Moves the sword's grip along the handle relative to the controller, in cm (+ = towards the blade).
@@ -142,7 +142,42 @@ namespace hsvr
         double hand_roll = 0.0;
         // Write "Arms:" lines to the log (once a second): where each hand should be and where it is.
         bool log_arms = true;
-        // Developer switches.
+        // ---- debug drawing (debug_draw.cpp) ----
+        // 1 = draw the driver skeleton and a sphere at each controller, in the game world.
+        bool debug_draw = false;
+        // Radius of the controller spheres, cm.
+        // ---- driver pose system (arm_control.cpp) ----
+        // 1 = place each hand by sharing the displacement across its ancestors (weighted
+        // placement) instead of solving a two-bone IK. The head is not moved at all.
+        bool pose_system = false;
+        // How many ancestors share the movement (1 = only the bone before the hand).
+        // Weights for the nearest, next and next-after ancestors (normalised).
+        // A long reach also pulls the spine by this weight (so the shoulder stays attached).
+        // How far a hand target must be from its animated spot before the spine joins, cm.
+        // Share of a target's rotation that the ancestors take (0 = only the bone turns).
+        // 1 = the hand target also carries the controller's rotation.
+        bool pose_hand_rotation = true;
+        // FABRIK reach: how many chain bones solve together (4 = arm only, 5-6 include the spine),
+        // the soft limit as a fraction of full arm length, where easing starts, its time constant
+        // in seconds, and how much of the solved rotation the spine bones actually take.
+        int pose_reach_bones = 5;
+        double pose_reach_max = 0.97;
+        double pose_reach_knee = 0.88;
+        double pose_reach_smoothing = 0.12;
+        double pose_reach_spine_share = 0.35;
+        // Scale applied to the requested hand distance (1 = as measured). Below 1 shortens the
+        // request so a long-armed player does not always pull the character past its reach.
+        double pose_arm_scale = 1.0;
+        // 1 = the head is a fixed point too, placed where the headset is; chain length for it.
+        bool pose_head = false;
+        // Camera height above the character's root when the body anchor is used (cm).
+        int pose_head_bones = 5;
+        // 1 = when the hands come together with a grip held, the left hand is put on the hilt.
+        bool two_handed = true;
+        // How far below the right hand the left hand goes on the handle, cm.
+        double two_handed_offset_cm = 10.0;
+        // How close the controllers must be for the two-handed grip to engage, cm.
+        double two_handed_distance_cm = 35.0;
         bool log_poses = false;
         // Write "Input:" lines to the log: which window has the keyboard, Esc and menu clicks,
         // gamepad sticks, and how fast the view is turning.
@@ -158,6 +193,9 @@ namespace hsvr
         bool dev_fake_headset = false;
         // Test without anyone holding the controllers: pretend hands in front of the chest.
         bool dev_fake_hands = false;
+        // With dev_fake_hands: also sweep the sticks and press the buttons, so walking, turning
+        // and the actions can be checked without controllers (watch the game window and the log).
+        // Scripted self-test: walks, strafes, turns, thrusts, grabs, jumps and crouches in a fixed
         // Test without anyone playing: drive the arms of the first fighter in the level.
         bool dev_arms_any_character = false;
         // The pretend headset holds still, looking dev_fake_yaw degrees to the left and

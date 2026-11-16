@@ -868,6 +868,7 @@ namespace
                 menu = shared.game_paused.load();
             }
             hsvr::arm_game_tick(pawn, menu);
+            hsvr::arm_debug_draw();
         }
 
         hsvr::Config cfg = hsvr::config();

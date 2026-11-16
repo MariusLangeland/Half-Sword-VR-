@@ -8,6 +8,11 @@
 // See docs/phase3-motion-controls.md.
 #pragma once
 
+#include "vrmath.hpp"
+
+#include <cstdint>
+#include <vector>
+
 namespace RC::Unreal
 {
     class UObject;
@@ -21,4 +26,8 @@ namespace hsvr
 
     // Flips motion arms on or off while playing (a key).
     void arm_toggle();
+
+    // Shows the game's hidden driver skeleton mesh (debug_draw setting) so the pose the solver
+    // produces can be seen. Works with motion arms off or a menu up.
+    void arm_debug_draw();
 } // namespace hsvr

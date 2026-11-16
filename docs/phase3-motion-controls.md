@@ -82,10 +82,62 @@ Developer switches: `dev_fake_hands` (pretend controllers circling in front of t
 - `open /Game/Maps/Arenas/Map_Arena_Cellar` (and Slums) from the splash screen loaded the arena but
   spawned no character on 2026-11-15, so the arm code could not be exercised without someone playing.
 
+## Hold assist raised (2026-11-16)
+
+The first fight log showed the right hand sitting 15 to 25 cm and 30 to 50 degrees behind what was
+sent, while the hold assist was capped at `assist_max_cm 15` and `assist_max_deg 35`, so its
+correction was saturated. The caps are now 25 cm and 45 degrees; `assist_seconds` stays 0.4, so
+fast swings are still not changed by it. Both keys are read from `HalfSwordVR.ini` when present.
+
+## Driver pose solver (FABRIK)
+
+The hands were first placed by solving each arm with a two-bone IK, and an experiment replaced that
+with a general "place this bone here" primitive. That experiment failed for a specific reason worth
+recording: the visible body is a physical ragdoll and its muscles are **angular drives**. A pose
+whose bone positions were moved without preserving the distances between joints cannot be
+reproduced by the ragdoll, so the hand followed only its rotation and the forearm/upper arm visibly
+came apart.
+
+The solver therefore works in rotations with **fixed segment lengths**:
+
+- **FABRIK** over the chain `hand ← forearm ← upper arm ← clavicle ← spine_05` (`pose_reach_bones`,
+  default 5; 4 = arm only). Segment lengths are taken from the animated pose and preserved, so the
+  result is a pose the ragdoll can follow, position and rotation both.
+- **Soft reach limit**: exact up to `pose_reach_knee` (0.88 of arm length); beyond that the request
+  is compressed exponentially toward `pose_reach_max` (0.97) and time-smoothed
+  (`pose_reach_smoothing`, 0.12 s). The elbow never locks straight and there is no snap.
+- **Torso help**: bones above the clavicle take `pose_reach_spine_share` (0.35) of their solved
+  rotation; the share rises toward 1 as the target exceeds reach, so the chest leans in instead of
+  the hand simply dragging behind.
+- **Arm scale**: `pose_arm_scale` (1.0) scales the requested distance, for players whose arms are
+  longer than the character's.
+- **Hand rotation** comes from the controller (`pose_hand_rotation`).
+- The old two-bone IK path is still selectable with `pose_system=0`.
+
+Everything input related was removed: there is no walking, turning, jumping or button handling in
+the mod any more; only the driver skeleton is driven. The arbitrary-bone placement API of the
+failed experiment was removed with it.
+
+Debug view: `debug_draw=1` makes the game's hidden `DriverSkeleton` mesh visible, which shows the
+pose the solver produces. The engine's own `DrawDebugLine`/`DrawDebugSphere` are compiled out of
+Shipping builds, and drawing into the runtime's swapchain from this game's Present path crashed the
+presenter twice, so neither is used.
+
+## Head as a pose target (not enabled)
+
+Placing the Head bone at the headset position was implemented (`pose_head`, `pose_head_bones`) but
+is **off by default**. With the camera anchored to the character's head bone the head target fed
+back into the view: offsetting the head made the character bend and drift. A body-anchor camera
+(`anchor=body`, actor root + measured eye offset) exists to break that loop but has not been
+verified yet.
+
 ## Open
 
-- Not yet tried in the headset: accuracy, feel, whether the muscles are strong enough, elbow look.
-- Buttons are read (trigger, grip) but do nothing yet; grabbing, guard, thrust, two-handed grip and
-  walking still use mouse and keyboard.
-- Two-handed grip: the left hand follows its own controller even when the game puts it on the hilt.
+
+- The FABRIK solver still leaves a small steady offset from the controller position, and the hand
+  falls further behind when the player's arms are longer than the character's (tune
+  `pose_arm_scale`, `grip_shift_cm`, `hand_pitch`/`yaw`/`roll`).
+- The head target is implemented but disabled: the body-anchor camera must be verified first.
+- Two-handed grip now puts the left hand on the hilt, but it is a fixed offset and has not been
+  tuned against real combat.
 - Physics assist for tip accuracy (option C in the research notes) only if the muscles prove too weak.

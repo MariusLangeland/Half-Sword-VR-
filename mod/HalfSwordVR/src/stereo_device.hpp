@@ -27,6 +27,15 @@ namespace hsvr
     // Called once per engine tick on the game thread, before the frame is drawn.
     void stereo_begin_game_frame(double delta_seconds);
 
+    // The player's head (between the eyes) in world cm from the (possibly body-anchored) camera,
+    // minus the eye offsets: where the head bone should be. Independent of the head bone itself.
+    bool stereo_headset_world(Vec3& out_position_cm);
+
+    // Projects a world position (Unreal centimetres) into one eye's normalised image coordinates
+    // (0..1, u right, v down). False when the point is behind the eye.
+    bool stereo_world_to_eye_uv(const Vec3& world_cm, float px, float py, float pz, float qx, float qy, float qz, float qw, float angle_left,
+                                float angle_right, float angle_up, float angle_down, float& u, float& v, float& depth_m);
+
     // True while the engine draws the eyes into their own full-size target (settings key
     // separate_render_target) rather than side by side into the game window.
     bool stereo_separate_target();

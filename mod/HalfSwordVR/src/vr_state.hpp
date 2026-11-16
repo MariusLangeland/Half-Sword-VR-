@@ -40,7 +40,7 @@ namespace hsvr
         bool position_tracked = false;
         float px = 0, py = 0, pz = 0;
         float qx = 0, qy = 0, qz = 0, qw = 1;
-        float trigger = 0, squeeze = 0; // 0..1, for the log for now
+        float trigger = 0, squeeze = 0; // 0..1
     };
 
     struct VrShared
